@@ -1,0 +1,171 @@
+"""Coupling analysis *inside* a dispatch chain.
+
+Why this exists separately from `carve.coupling`
+------------------------------------------------
+`coupling` classifies a module's top-level functions. That is the common case
+and it is not the interesting one, because the worst monoliths do not hide their
+mass in many functions -- they hide it in **one**.
+
+The real target this was extracted from is a 7,789-line `run_tool(name, inputs)`
+containing a 219-branch `if name == "..." / elif ...` chain. To `coupling` that
+is a single welded function with 70 dependencies: technically true, completely
+useless. The 219 units you actually want to move are invisible.
+
+This module makes each branch a unit.
+
+The orelse trap, in detail
+--------------------------
+`ast.walk` on an `ast.If` descends into `orelse`. In an if/elif chain, `orelse`
+is *the entire rest of the chain* -- so branch #1 appears to depend on everything
+branches #2..#219 depend on, and #219 on nothing. The dependency counts slide
+smoothly down the chain and look like a real finding about layering.
+
+They are a finding about the walker. **A number that decreases neatly with
+position is measuring position.** Every function here walks `node.body` only.
+
+Locals are not dependencies
+---------------------------
+A branch reading `path` when `run_tool` did `path = inputs["path"]` three lines
+earlier is not coupled to the module. `symtable` resolves the *containing
+function's* scope, and those locals are excluded -- otherwise every branch looks
+welded to its own function's variables and the whole analysis reads as "nothing
+can move".
+"""
+
+import ast
+import builtins
+import symtable
+
+from .coupling import defined_names
+
+_BUILTINS = frozenset(dir(builtins))
+
+
+def find_function(tree, name):
+    """The top-level function named `name`, or None."""
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
+            return node
+    return None
+
+
+def _branch_value(test, discriminant):
+    """The constant a branch compares the discriminant against.
+
+    Matches `name == "x"` and `name in ("x", "y")`. Returns a list, because one
+    branch can serve several names -- collapsing that to a single value silently
+    drops tools from the inventory.
+    """
+    if not isinstance(test, ast.Compare):
+        return []
+    if not (isinstance(test.left, ast.Name) and test.left.id == discriminant):
+        return []
+    out = []
+    for comp in test.comparators:
+        if isinstance(comp, ast.Constant) and isinstance(comp.value, str):
+            out.append(comp.value)
+        elif isinstance(comp, (ast.Tuple, ast.List, ast.Set)):
+            out.extend(
+                e.value for e in comp.elts
+                if isinstance(e, ast.Constant) and isinstance(e.value, str)
+            )
+    return out
+
+
+def find_chain(tree, function_name, discriminant="name", min_length=3):
+    """Locate the dispatch chain and return [(values, if_node), ...] in order.
+
+    `min_length` guards against latching onto some small unrelated `if` earlier
+    in the function -- the chain you want is the long one. Getting this wrong is
+    silent: you analyse three branches, report them, and never learn the other
+    216 exist.
+    """
+    fn = find_function(tree, function_name)
+    if fn is None:
+        return []
+    best = []
+    for stmt in ast.walk(fn):
+        if not isinstance(stmt, ast.If):
+            continue
+        chain, cur = [], stmt
+        while isinstance(cur, ast.If):
+            values = _branch_value(cur.test, discriminant)
+            if values:
+                chain.append((values, cur))
+            cur = (
+                cur.orelse[0]
+                if len(cur.orelse) == 1 and isinstance(cur.orelse[0], ast.If)
+                else None
+            )
+        if len(chain) > len(best):
+            best = chain
+    return best if len(best) >= min_length else []
+
+
+def _function_locals(source, filename, function_name):
+    """Names bound locally inside the containing function."""
+    top = symtable.symtable(source, filename, "exec")
+    for child in top.get_children():
+        if child.get_name() == function_name and child.get_type() == "function":
+            return {
+                s.get_name()
+                for s in child.get_symbols()
+                if s.is_assigned() or s.is_parameter()
+            }
+    return set()
+
+
+def _branch_deps(node, defined, skip):
+    """Module-level names a branch's OWN body loads. Never touches orelse."""
+    used = set()
+    for stmt in node.body:
+        for child in ast.walk(stmt):
+            if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Load):
+                if child.id in defined and child.id not in _BUILTINS and child.id not in skip:
+                    used.add(child.id)
+    return used
+
+
+def classify_chain(source, function_name, discriminant="name", filename="<module>", ignore=()):
+    """Split a dispatch chain's branches into free and welded.
+
+    Returns (free, welded): `free` is a list of branch values movable as pure
+    relocations; `welded` maps value -> sorted internals it needs.
+    """
+    tree = ast.parse(source)
+    defined = defined_names(tree)
+    skip = _function_locals(source, filename, function_name) | set(ignore) | {function_name}
+
+    free, welded = [], {}
+    for values, node in find_chain(tree, function_name, discriminant):
+        deps = sorted(_branch_deps(node, defined, skip))
+        for value in values:
+            if deps:
+                welded[value] = deps
+            else:
+                free.append(value)
+    return free, welded
+
+
+def report(source, function_name, discriminant="name", filename="<module>", ignore=()):
+    """How much of this dispatch chain can move today?
+
+    Reports targets AND branches, because they differ and both matter: one
+    `elif name in ("a", "b")` is a single branch serving two tools. You move
+    *targets*; you delete *branches*. Printing one number labelled as the other
+    is how an inventory quietly loses a tool.
+    """
+    tree = ast.parse(source)
+    branches = len(find_chain(tree, function_name, discriminant))
+    free, welded = classify_chain(
+        source, function_name, discriminant=discriminant, filename=filename, ignore=ignore
+    )
+    total = len(free) + len(welded)
+    if not total:
+        return f"no dispatch chain found in {function_name}() on `{discriminant}`"
+    suffix = f" across {branches} branches" if branches != total else ""
+    return "\n".join([
+        f"{function_name}(): {total} dispatch targets on `{discriminant}`{suffix}",
+        f"  free   {len(free):>4}  ({len(free) / total * 100:.0f}%) - movable as pure relocations",
+        f"  welded {len(welded):>4}  ({len(welded) / total * 100:.0f}%) - need a seam first",
+    ])
