@@ -134,7 +134,22 @@ def classify_chain(source, function_name, discriminant="name", filename="<module
     """
     tree = ast.parse(source)
     defined = defined_names(tree)
-    skip = _function_locals(source, filename, function_name) | set(ignore) | {function_name}
+    # NOTE: `function_name` is deliberately NOT skipped here, unlike in
+    # coupling.classify. The two have opposite semantics and conflating them
+    # produces a FALSE FREE -- the worst error this library can make.
+    #
+    # In coupling, a function calling itself is recursion: it takes itself with
+    # it, so it is not welded to anything left behind. In a dispatch chain, a
+    # BRANCH calling the dispatcher is welded to it absolutely -- the branch
+    # cannot leave without a callback or a circular import.
+    #
+    # Real case: maxima's `web_search` falls back to `run_tool("web_search_live")`.
+    # Skipping the containing name reported it movable. It is not: extracting it
+    # would need either a circular import back to the origin module or a
+    # tool-runner seam, and the tempting shortcut -- calling the inner handler
+    # directly -- silently drops the dispatcher's audit-log entry for the inner
+    # tool, which is a behaviour change wearing a refactor's clothes.
+    skip = _function_locals(source, filename, function_name) | set(ignore)
 
     free, welded = [], {}
     for values, node in find_chain(tree, function_name, discriminant):

@@ -85,6 +85,45 @@ class FreeVsWelded(unittest.TestCase):
         self.assertIn("list_dir", free)
 
 
+class TheRecursiveDispatchTrap(unittest.TestCase):
+    """A branch calling its own dispatcher is welded, not free.
+
+    The real one, and the worst error this library can make: a FALSE FREE.
+
+    maxima's `web_search` falls back to `run_tool("web_search_live")`. carve
+    inherited coupling.classify's rule that a function referencing itself is
+    recursion -- true there, because the function takes itself with it -- and
+    applied it to branches, where it is exactly backwards. The branch reported
+    as movable. It is not: extracting it needs a circular import back to the
+    origin or a tool-runner seam.
+
+    A false weld costs a wasted investigation. A false free costs a broken
+    extraction, discovered later, by a user.
+    """
+
+    # Three branches minimum: find_chain's min_length guard exists so a small
+    # unrelated `if` earlier in a function cannot be mistaken for the chain.
+    SOURCE = (
+        "def helper(): return 1\n"
+        "def run_tool(name, inputs):\n"
+        "    if name == 'plain':\n"
+        "        return 1\n"
+        "    elif name == 'other':\n"
+        "        return 2\n"
+        "    elif name == 'recurses':\n"
+        "        return run_tool('plain', inputs)\n"
+    )
+
+    def test_a_branch_calling_the_dispatcher_is_welded_to_it(self):
+        free, welded = dispatch.classify_chain(self.SOURCE, "run_tool")
+        self.assertIn("plain", free)
+        self.assertEqual(
+            welded.get("recurses"), ["run_tool"],
+            "a branch that calls its own dispatcher was reported movable -- "
+            "extracting it needs a callback or a circular import",
+        )
+
+
 class TheOrelseTrap(unittest.TestCase):
     """The bug that produced monotonically descending dependency counts.
 
