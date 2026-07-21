@@ -62,4 +62,4 @@ Nothing to install. Stdlib only — `ast`, `symtable`, `builtins`. It never impo
 python -m unittest discover tests
 ```
 
-MIT. Built by [Lance Jilliard Galicia](https://github.com/Lancimoun) with Claude Code.
+MIT. Built by [Architect L.](https://github.com/Lancimoun) with Claude Code.
