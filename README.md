@@ -59,11 +59,33 @@ The worst monoliths do not scatter their mass across many functions — they hid
 
 `carve.dispatch` makes **each branch a unit** and classifies them individually, so a giant dispatcher becomes a ranked worklist instead of a wall.
 
+### Sizing the seam — the order a weld comes apart
+
+`dispatch` tells you a branch is welded. It does not tell you *how hard*, and the names a weld references are wildly unequal in cost. An `import`-alias (`_re = re`) re-imports for free; a constant or a lookup table moves to a config module; a shared function is the real seam a dependency injection has to carry. Count the welded branches and they all look equally stuck; weigh each name by *how it is carried* and a plan appears.
+
+`carve.seam` does the weighing, and turns the count into a **cumulative unlock staircase**:
+
+```python
+from carve import seam
+print(seam.report(open("monolith.py").read(), "run_tool",
+                  seam={"load_memory", "save_memory", "_mem_write_lock", "DEFAULT_MEM"}))
+# run_tool(): 79 welded branches, 67 distinct internal names carried by the weld
+#   63/79 welded branches need only 1-2 names
+#
+# cumulative unlock staircase:
+#   tier 0  cheap-carry only (config/data, no seam) :  19   (cum 19)
+#   tier 1  + the one injected seam                 :  26   (cum 45)
+#   tier 2  + each branch's single-use helper       :  24   (cum 69)
+#   tier 3  genuine shared-service seams remain     :  10
+```
+
+That is the real shape of the 219-branch dispatcher above, once the leaves are gone. "79 welded, needs an architecture decision" becomes "one injected accessor unlocks **45** of them; only **10** need genuine dependency injection." The scary number was hiding a plan.
+
 ---
 
 ## API
 
-Three modules, standard-library only. Every function takes source text or a path and returns data — nothing is imported or executed.
+Four modules, standard-library only. Every function takes source text or a path and returns data — nothing is imported or executed.
 
 | Module | Function | What it answers |
 |---|---|---|
@@ -75,6 +97,9 @@ Three modules, standard-library only. Every function takes source text or a path
 | | `report(src, func)` | Ranked worklist for carving up a single dispatcher |
 | **`resolve`** | `unresolved_names(src)` | Names a module uses but never imports or defines |
 | | `check_path(path)` · `check_package(dir)` | The same check across a file or a whole package |
+| **`seam`** | `weld_shape(src, func)` | The welded names grouped by *kind* — how costly each is to carry |
+| | `unlock_tiers(src, func, seam=…)` | The cumulative staircase: what unlocks with a config move, one seam, then co-moved helpers |
+| | `report(src, func, seam=…)` | The human-readable weld shape + unlock staircase |
 
 ---
 
@@ -117,7 +142,7 @@ Nothing to install. Standard library only — `ast`, `symtable`, `builtins` — 
 ```bash
 git clone https://github.com/Lancimoun/carve
 cd carve
-python -m unittest discover tests    # 30 tests, no installs
+python -m unittest discover tests    # 47 tests, no installs
 ```
 
 The CI badge above runs that exact command on every push. Because CARVE has zero dependencies, a green run with **no `pip install` step** is itself the proof of the zero-dependency claim.
