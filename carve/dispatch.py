@@ -36,40 +36,80 @@ import ast
 import builtins
 import symtable
 
-from .coupling import defined_names
+from .coupling import _global_writes, defined_names
 
 _BUILTINS = frozenset(dir(builtins))
 
 
 def find_function(tree, name):
     """The top-level function named `name`, or None."""
-    for node in ast.walk(tree):
+    for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
             return node
     return None
 
 
+def _walk_function_scope(function):
+    """Yield `(node, parent)` without descending into nested scopes."""
+    stack = [(node, function) for node in reversed(function.body)]
+    while stack:
+        node, parent = stack.pop()
+        yield node, parent
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            continue
+        children = list(ast.iter_child_nodes(node))
+        stack.extend((child, node) for child in reversed(children))
+
+
 def _branch_value(test, discriminant):
     """The constant a branch compares the discriminant against.
 
-    Matches `name == "x"` and `name in ("x", "y")`. Returns a list, because one
-    branch can serve several names -- collapsing that to a single value silently
-    drops tools from the inventory.
+    Matches only `name == "x"` (in either operand order) and
+    `name in ("x", "y")`. Returns a list, because one branch can serve several
+    names -- collapsing that to a single value silently drops tools from the
+    inventory.
+
+    The operator check is load-bearing. Treating `name != "x"` or
+    `name not in (...)` as a named target inverts runtime behavior while still
+    producing a plausible-looking inventory.
     """
     if not isinstance(test, ast.Compare):
         return []
+    if len(test.ops) != 1 or len(test.comparators) != 1:
+        return []
+
+    op = test.ops[0]
+    right = test.comparators[0]
+
+    if isinstance(op, ast.Eq):
+        if (
+            isinstance(test.left, ast.Name)
+            and test.left.id == discriminant
+            and isinstance(right, ast.Constant)
+            and isinstance(right.value, str)
+        ):
+            return [right.value]
+        if (
+            isinstance(right, ast.Name)
+            and right.id == discriminant
+            and isinstance(test.left, ast.Constant)
+            and isinstance(test.left.value, str)
+        ):
+            return [test.left.value]
+        return []
+
+    if not isinstance(op, ast.In):
+        return []
     if not (isinstance(test.left, ast.Name) and test.left.id == discriminant):
         return []
-    out = []
-    for comp in test.comparators:
-        if isinstance(comp, ast.Constant) and isinstance(comp.value, str):
-            out.append(comp.value)
-        elif isinstance(comp, (ast.Tuple, ast.List, ast.Set)):
-            out.extend(
-                e.value for e in comp.elts
-                if isinstance(e, ast.Constant) and isinstance(e.value, str)
-            )
-    return out
+    if not isinstance(right, (ast.Tuple, ast.List, ast.Set)):
+        return []
+    if not all(
+        isinstance(element, ast.Constant) and isinstance(element.value, str)
+        for element in right.elts
+    ):
+        return []
+    return [element.value for element in right.elts]
 
 
 def find_chain(tree, function_name, discriminant="name", min_length=3):
@@ -84,14 +124,28 @@ def find_chain(tree, function_name, discriminant="name", min_length=3):
     if fn is None:
         return []
     best = []
-    for stmt in ast.walk(fn):
+    for stmt, parent in _walk_function_scope(fn):
         if not isinstance(stmt, ast.If):
+            continue
+        # An elif is already visited through its chain head. Starting again at
+        # every suffix makes a long dispatcher quadratic and can let the suffix
+        # masquerade as a second candidate chain.
+        if (
+            isinstance(parent, ast.If)
+            and len(parent.orelse) == 1
+            and parent.orelse[0] is stmt
+        ):
             continue
         chain, cur = [], stmt
         while isinstance(cur, ast.If):
             values = _branch_value(cur.test, discriminant)
-            if values:
-                chain.append((values, cur))
+            if not values:
+                # Skipping an unsupported guard and stitching the later elifs
+                # together invents a chain: `name != "x"` can make every
+                # following equality unreachable. Reject the candidate whole.
+                chain = []
+                break
+            chain.append((values, cur))
             cur = (
                 cur.orelse[0]
                 if len(cur.orelse) == 1 and isinstance(cur.orelse[0], ast.If)
@@ -102,26 +156,46 @@ def find_chain(tree, function_name, discriminant="name", min_length=3):
     return best if len(best) >= min_length else []
 
 
-def _function_locals(source, filename, function_name):
-    """Names bound locally inside the containing function."""
+def _function_scope(source, filename, function_name):
+    """Return local bindings and names explicitly written through `global`."""
     top = symtable.symtable(source, filename, "exec")
     for child in top.get_children():
         if child.get_name() == function_name and child.get_type() == "function":
-            return {
-                s.get_name()
-                for s in child.get_symbols()
-                if s.is_assigned() or s.is_parameter()
+            symbols = child.get_symbols()
+            local = {
+                symbol.get_name()
+                for symbol in symbols
+                if (symbol.is_assigned() or symbol.is_parameter())
+                and not symbol.is_global()
             }
-    return set()
+            global_writes = _global_writes(child)
+            return local, global_writes
+    return set(), set()
 
 
-def _branch_deps(node, defined, skip):
-    """Module-level names a branch's OWN body loads. Never touches orelse."""
+def _function_locals(source, filename, function_name):
+    """Names bound locally inside the containing function."""
+    return _function_scope(source, filename, function_name)[0]
+
+
+def _branch_deps(node, defined, skip, global_writes=frozenset()):
+    """Origin-module names a branch's OWN body reads or writes."""
     used = set()
     for stmt in node.body:
         for child in ast.walk(stmt):
-            if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Load):
-                if child.id in defined and child.id not in _BUILTINS and child.id not in skip:
+            if isinstance(child, ast.Name):
+                is_owned_read = (
+                    isinstance(child.ctx, ast.Load) and child.id in defined
+                )
+                is_global_write = (
+                    isinstance(child.ctx, (ast.Store, ast.Del))
+                    and child.id in global_writes
+                )
+                if (
+                    (is_owned_read or is_global_write)
+                    and child.id not in _BUILTINS
+                    and child.id not in skip
+                ):
                     used.add(child.id)
     return used
 
@@ -149,11 +223,12 @@ def classify_chain(source, function_name, discriminant="name", filename="<module
     # tool-runner seam, and the tempting shortcut -- calling the inner handler
     # directly -- silently drops the dispatcher's audit-log entry for the inner
     # tool, which is a behaviour change wearing a refactor's clothes.
-    skip = _function_locals(source, filename, function_name) | set(ignore)
+    local, global_writes = _function_scope(source, filename, function_name)
+    skip = local | set(ignore)
 
     free, welded = [], {}
     for values, node in find_chain(tree, function_name, discriminant):
-        deps = sorted(_branch_deps(node, defined, skip))
+        deps = sorted(_branch_deps(node, defined, skip, global_writes))
         for value in values:
             if deps:
                 welded[value] = deps
