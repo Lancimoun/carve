@@ -43,6 +43,33 @@ class ChainDiscovery(unittest.TestCase):
     def test_missing_function_is_not_a_crash(self):
         self.assertEqual(dispatch.classify_chain(CHAIN, "nonexistent"), ([], {}))
 
+    def test_a_nested_function_is_not_a_top_level_dispatcher(self):
+        source = (
+            "def wrapper():\n"
+            "    def run_tool(name, inputs):\n"
+            "        if name == 'a': return 1\n"
+            "        elif name == 'b': return 2\n"
+            "        elif name == 'c': return 3\n"
+            "    return run_tool\n"
+        )
+        self.assertEqual(dispatch.classify_chain(source, "run_tool"), ([], {}))
+
+    def test_a_nested_longer_chain_cannot_replace_the_real_chain(self):
+        source = (
+            "def run_tool(name, inputs):\n"
+            "    if name == 'outer_a': return 1\n"
+            "    elif name == 'outer_b': return 2\n"
+            "    elif name == 'outer_c': return 3\n"
+            "    def nested(name):\n"
+            "        if name == 'inner_a': return 1\n"
+            "        elif name == 'inner_b': return 2\n"
+            "        elif name == 'inner_c': return 3\n"
+            "        elif name == 'inner_d': return 4\n"
+            "    return nested\n"
+        )
+        free, _ = dispatch.classify_chain(source, "run_tool")
+        self.assertEqual(sorted(free), ["outer_a", "outer_b", "outer_c"])
+
     def test_short_unrelated_ifs_are_not_mistaken_for_the_chain(self):
         # A two-branch guard early in the function must not win over the real
         # chain. Getting this wrong is silent: you analyse 2 branches, report
@@ -60,6 +87,73 @@ class ChainDiscovery(unittest.TestCase):
         )
         free, welded = dispatch.classify_chain(src, "run_tool")
         self.assertEqual(sorted(free), ["x", "y", "z"])
+
+
+class ComparisonSemantics(unittest.TestCase):
+    """A dispatch target exists only when the comparison actually selects it."""
+
+    def test_not_equal_does_not_invert_into_a_named_target(self):
+        src = (
+            "def helper(): return 1\n"
+            "def run_tool(name, inputs):\n"
+            "    if name != 'blocked':\n"
+            "        return helper()\n"
+            "    elif name == 'b':\n"
+            "        return 2\n"
+            "    elif name == 'c':\n"
+            "        return 3\n"
+            "    elif name == 'd':\n"
+            "        return 4\n"
+        )
+        free, welded = dispatch.classify_chain(src, "run_tool")
+        self.assertEqual(free, [])
+        self.assertEqual(welded, {})
+        self.assertNotIn("blocked", welded)
+
+    def test_not_in_and_ordering_comparisons_are_not_dispatch_targets(self):
+        src = (
+            "def run_tool(name, inputs):\n"
+            "    if name not in ('a', 'b'):\n"
+            "        return 1\n"
+            "    elif name < 'm':\n"
+            "        return 2\n"
+            "    elif name == 'real':\n"
+            "        return 3\n"
+            "    elif name == 'also_real':\n"
+            "        return 4\n"
+            "    elif name == 'third_real':\n"
+            "        return 5\n"
+        )
+        free, _ = dispatch.classify_chain(src, "run_tool")
+        self.assertEqual(free, [])
+
+    def test_equal_to_a_tuple_is_not_the_same_as_membership(self):
+        src = (
+            "def run_tool(name, inputs):\n"
+            "    if name == ('invented_a', 'invented_b'):\n"
+            "        return 1\n"
+            "    elif name == 'real_a':\n"
+            "        return 2\n"
+            "    elif name == 'real_b':\n"
+            "        return 3\n"
+            "    elif name == 'real_c':\n"
+            "        return 4\n"
+        )
+        free, _ = dispatch.classify_chain(src, "run_tool")
+        self.assertEqual(free, [])
+
+    def test_reversed_equality_is_a_real_dispatch_target(self):
+        src = (
+            "def run_tool(name, inputs):\n"
+            "    if 'a' == name:\n"
+            "        return 1\n"
+            "    elif name == 'b':\n"
+            "        return 2\n"
+            "    elif name in ('c', 'd'):\n"
+            "        return 3\n"
+        )
+        free, _ = dispatch.classify_chain(src, "run_tool")
+        self.assertEqual(sorted(free), ["a", "b", "c", "d"])
 
 
 class FreeVsWelded(unittest.TestCase):
@@ -83,6 +177,44 @@ class FreeVsWelded(unittest.TestCase):
         free, welded = dispatch.classify_chain(CHAIN, "run_tool")
         self.assertNotIn("path", welded.get("list_dir", []))
         self.assertIn("list_dir", free)
+
+    def test_a_branch_writing_a_declared_global_is_welded(self):
+        source = (
+            "STATE = {}\n"
+            "def run_tool(name, inputs):\n"
+            "    global STATE\n"
+            "    if name == 'replace':\n"
+            "        STATE = {'moved': True}\n"
+            "        return STATE\n"
+            "    elif name == 'b':\n"
+            "        return 2\n"
+            "    elif name == 'c':\n"
+            "        return 3\n"
+        )
+        _, welded = dispatch.classify_chain(source, "run_tool")
+        self.assertEqual(welded["replace"], ["STATE"])
+
+    def test_module_scope_bindings_under_complex_targets_are_welds(self):
+        source = (
+            "LEFT, RIGHT = (1, 2)\n"
+            "if True:\n"
+            "    STATE = {}\n"
+            "for ITEM in [1]:\n"
+            "    pass\n"
+            "def run_tool(name, inputs):\n"
+            "    if name == 'left':\n"
+            "        return LEFT\n"
+            "    elif name == 'state':\n"
+            "        return STATE\n"
+            "    elif name == 'item':\n"
+            "        return ITEM\n"
+        )
+        free, welded = dispatch.classify_chain(source, "run_tool")
+        self.assertEqual(free, [])
+        self.assertEqual(
+            welded,
+            {"item": ["ITEM"], "left": ["LEFT"], "state": ["STATE"]},
+        )
 
 
 class TheRecursiveDispatchTrap(unittest.TestCase):

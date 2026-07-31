@@ -65,6 +65,79 @@ class FreeVsWelded(unittest.TestCase):
         self.assertEqual(welded, {})
         self.assertEqual(free, ["compute"])
 
+    def test_writing_a_declared_global_is_a_dependency(self):
+        free, welded = coupling.classify(
+            "STATE = {}\n"
+            "def replace_state():\n"
+            "    global STATE\n"
+            "    STATE = {'moved': True}\n"
+        )
+        self.assertEqual(free, [])
+        self.assertEqual(welded, {"replace_state": ["STATE"]})
+
+    def test_augassign_to_a_declared_global_is_a_dependency(self):
+        free, welded = coupling.classify(
+            "COUNT = 0\n"
+            "def increment():\n"
+            "    global COUNT\n"
+            "    COUNT += 1\n"
+        )
+        self.assertEqual(free, [])
+        self.assertEqual(welded, {"increment": ["COUNT"]})
+
+    def test_a_module_owned_default_is_a_definition_dependency(self):
+        free, welded = coupling.classify(
+            "STATE = object()\n"
+            "def uses_default(value=STATE):\n"
+            "    return value\n"
+        )
+        self.assertEqual(free, [])
+        self.assertEqual(welded, {"uses_default": ["STATE"]})
+
+    def test_a_module_owned_decorator_is_a_definition_dependency(self):
+        free, welded = coupling.classify(
+            "def decorate(fn): return fn\n"
+            "@decorate\n"
+            "def registered(): return 1\n"
+        )
+        self.assertEqual(free, ["decorate"])
+        self.assertEqual(welded, {"registered": ["decorate"]})
+
+    def test_module_owned_annotations_are_definition_dependencies(self):
+        free, welded = coupling.classify(
+            "class Internal: pass\n"
+            "def convert(value: Internal) -> Internal:\n"
+            "    return value\n"
+        )
+        self.assertEqual(free, [])
+        self.assertEqual(welded, {"convert": ["Internal"]})
+
+    def test_destructured_module_assignments_are_defined_names(self):
+        free, welded = coupling.classify(
+            "LEFT, RIGHT = (1, 2)\n"
+            "def read_left(): return LEFT\n"
+        )
+        self.assertEqual(free, [])
+        self.assertEqual(welded, {"read_left": ["LEFT"]})
+
+    def test_bindings_under_module_control_flow_are_defined_names(self):
+        free, welded = coupling.classify(
+            "if True:\n"
+            "    STATE = {}\n"
+            "def read_state(): return STATE\n"
+        )
+        self.assertEqual(free, [])
+        self.assertEqual(welded, {"read_state": ["STATE"]})
+
+    def test_module_loop_targets_are_defined_names(self):
+        free, welded = coupling.classify(
+            "for ITEM in [1]:\n"
+            "    pass\n"
+            "def read_item(): return ITEM\n"
+        )
+        self.assertEqual(free, [])
+        self.assertEqual(welded, {"read_item": ["ITEM"]})
+
 
 class TheOrelseTrap(unittest.TestCase):
     """The measurement bug that produced monotonically descending dep counts.

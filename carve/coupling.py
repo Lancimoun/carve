@@ -54,15 +54,30 @@ def defined_names(tree):
     anything. Anything here is state or behaviour that stays behind.
     """
     names = set()
-    for node in tree.body:
+    stack = list(tree.body)
+    while stack:
+        node = stack.pop()
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            # The name is bound in module scope; its body has a different scope.
             names.add(node.name)
-        elif isinstance(node, ast.Assign):
-            for target in node.targets:
-                if isinstance(target, ast.Name):
-                    names.add(target.id)
-        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
-            names.add(node.target.id)
+            continue
+        if isinstance(
+            node,
+            (ast.Lambda, ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp),
+        ):
+            continue
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            # Imports remain deliberately copyable, even inside control flow.
+            continue
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            names.add(node.id)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            names.add(node.name)
+        elif isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name:
+            names.add(node.name)
+        elif isinstance(node, ast.MatchMapping) and node.rest:
+            names.add(node.rest)
+        stack.extend(ast.iter_child_nodes(node))
     return names
 
 
@@ -80,19 +95,67 @@ def imported_names(tree):
 
 
 def _global_loads(table):
-    """Names a function reads from module/builtin scope, per symtable.
+    """Names a function reads or writes in module/builtin scope, per symtable.
 
-    is_global() and not is_assigned() means: not a local, not a closure cell,
-    not bound here. That is the only kind of reference that can break when the
-    function moves.
+    An explicit global write is as location-dependent as a read: after moving
+    the function, `global STATE` otherwise mutates the destination module.
     """
     out = set()
     for sym in table.get_symbols():
-        if sym.is_global() and not sym.is_assigned():
+        if sym.is_global() and (sym.is_referenced() or sym.is_assigned()):
             out.add(sym.get_name())
     for child in table.get_children():
         out |= _global_loads(child)
     return out
+
+
+def _global_writes(table):
+    """Names explicitly assigned through module scope, including nested scopes."""
+    out = {
+        sym.get_name()
+        for sym in table.get_symbols()
+        if sym.is_global() and sym.is_assigned()
+    }
+    for child in table.get_children():
+        out |= _global_writes(child)
+    return out
+
+
+def _definition_time_loads(function):
+    """Names evaluated in module scope while a function object is created.
+
+    Function symbol tables cover the body, not decorators, defaults, or
+    annotations. Those expressions travel with the definition too. Annotations
+    are counted conservatively even under postponed evaluation.
+    """
+    expressions = [
+        *function.decorator_list,
+        *function.args.defaults,
+        *(value for value in function.args.kw_defaults if value is not None),
+    ]
+    arguments = [
+        *function.args.posonlyargs,
+        *function.args.args,
+        *function.args.kwonlyargs,
+    ]
+    if function.args.vararg is not None:
+        arguments.append(function.args.vararg)
+    if function.args.kwarg is not None:
+        arguments.append(function.args.kwarg)
+    expressions.extend(
+        argument.annotation
+        for argument in arguments
+        if argument.annotation is not None
+    )
+    if function.returns is not None:
+        expressions.append(function.returns)
+    expressions.extend(getattr(function, "type_params", ()))
+    return {
+        child.id
+        for expression in expressions
+        for child in ast.walk(expression)
+        if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Load)
+    }
 
 
 def classify(source, filename="<module>", ignore=()):
@@ -114,11 +177,15 @@ def classify(source, filename="<module>", ignore=()):
         table = tables.get(node.name)
         if table is None:  # pragma: no cover - defensive
             continue
-        loads = _global_loads(table)
+        loads = _global_loads(table) | _definition_time_loads(node)
+        writes = _global_writes(table)
         deps = sorted(
             n
             for n in loads
-            if n in defined and n not in _BUILTINS and n != node.name and n not in ignore
+            if (n in defined or n in writes)
+            and (n not in _BUILTINS or n in writes)
+            and (n != node.name or n in writes)
+            and n not in ignore
         )
         if deps:
             welded[node.name] = deps
