@@ -458,5 +458,73 @@ class Report(unittest.TestCase):
         self.assertIn("2x service_a, 2x service_b", text)
 
 
+class ClusterClosure(unittest.TestCase):
+    """The direct dependency count answers "what does this touch". The number you
+    plan with is "what must MOVE TOGETHER", and on real code they differ by an
+    order of magnitude -- which is how a week of work gets scheduled as an
+    afternoon. This was written after a queue entry read "+2 helpers" and the
+    honest figure was fifteen: the helper pulled a whole subsystem behind it.
+    """
+
+    CHAIN = (
+        "def _deep(): return 1\n"
+        "def _mid(): return _deep()\n"
+        "def _top(): return _mid()\n"
+        "def _lonely(): return 2\n"
+        "def run_tool(name, inputs):\n"
+        "    if name == 'shallow':\n"
+        "        return _lonely()\n"
+        "    elif name == 'deep':\n"
+        "        return _top()\n"
+        # a third branch: find_chain requires min_length=3 before it will call a
+        # run of elifs a dispatch chain at all, so a two-branch fixture is
+        # classified as nothing and every assertion below silently passes on {}.
+        "    elif name == 'free':\n"
+        "        return inputs['x']\n"
+        "    return None\n"
+    )
+
+    def test_closure_follows_the_chain_not_just_the_first_hop(self):
+        self.assertEqual(seam.cluster_closure(self.CHAIN, {"_top"}), {"_mid", "_deep"})
+
+    def test_closure_excludes_the_seeds_so_len_is_the_extra_cost(self):
+        self.assertNotIn("_top", seam.cluster_closure(self.CHAIN, {"_top"}))
+
+    def test_a_self_contained_helper_has_an_empty_closure(self):
+        self.assertEqual(seam.cluster_closure(self.CHAIN, {"_lonely"}), set())
+
+    def test_cluster_cost_separates_direct_from_transitive(self):
+        cost = seam.cluster_cost(self.CHAIN, "run_tool")
+        # 'deep' touches ONE name directly and drags THREE definitions along.
+        self.assertEqual(cost["deep"]["direct"], 1)
+        self.assertEqual(cost["deep"]["closure"], 3)
+        # 'shallow' is the honest one-file move the other only looks like.
+        self.assertEqual(cost["shallow"]["direct"], 1)
+        self.assertEqual(cost["shallow"]["closure"], 1)
+
+    def test_recursion_terminates(self):
+        source = (
+            "def _a(): return _b()\n"
+            "def _b(): return _a()\n"
+            "def run_tool(name, inputs):\n"
+            "    if name == 'x':\n"
+            "        return _a()\n"
+            "    return None\n"
+        )
+        self.assertEqual(seam.cluster_closure(source, {"_a"}), {"_b"})
+
+    def test_imports_are_not_counted_as_cluster_members(self):
+        # Only names the module DEFINES have to move; imports follow you.
+        source = (
+            "import os\n"
+            "def _uses_import(): return os.getcwd()\n"
+            "def run_tool(name, inputs):\n"
+            "    if name == 'x':\n"
+            "        return _uses_import()\n"
+            "    return None\n"
+        )
+        self.assertEqual(seam.cluster_closure(source, {"_uses_import"}), set())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

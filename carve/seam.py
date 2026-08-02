@@ -665,3 +665,71 @@ def report(
             + ", ".join(f"{count}x {name}" for name, count in ordered)
         )
     return "\n".join(out)
+
+# --- transitive cluster closure ---------------------------------------------- #
+
+def cluster_closure(source, names, defined=None):
+    """Every module-level name reachable from `names`, following definitions.
+
+    A dispatch target that needs one private helper looks like a two-file move.
+    It is not, if that helper needs six more and each of those needs four. The
+    direct dependency count answers "what does this touch", and the number people
+    actually plan with is "what must MOVE TOGETHER" -- which is the transitive
+    closure and is routinely an order of magnitude larger.
+
+    This was written because a real queue entry read "+2 helpers" and the honest
+    figure was fifteen: the tool's helper pulled a memory-triage subsystem behind
+    it. Planning an extraction off the direct count schedules a week of work as an
+    afternoon.
+
+    Returns the closure EXCLUDING the seeds, so `len()` is "how many extra
+    definitions come along".
+    """
+    tree = ast.parse(source)
+    if defined is None:
+        defined = {
+            n.name for n in tree.body
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        }
+    bodies = {
+        n.name: n for n in tree.body
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+    }
+
+    seen, stack = set(), list(names)
+    while stack:
+        current = stack.pop()
+        node = bodies.get(current)
+        if node is None:
+            continue
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Load):
+                nm = sub.id
+                if nm in defined and nm not in seen and nm not in names:
+                    seen.add(nm)
+                    stack.append(nm)
+    return seen
+
+
+def cluster_cost(source, function_name, discriminant="name"):
+    """Per welded target: direct deps vs what must actually move with it.
+
+    Returns {target: {"direct": N, "closure": M, "names": sorted}}. `direct` is
+    what the dispatch analysis reports; `closure` is the honest planning number.
+    """
+    _, welded = dispatch.classify_chain(source, function_name, discriminant=discriminant)
+    tree = ast.parse(source)
+    defined = {
+        n.name for n in tree.body
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+    }
+    out = {}
+    for target, deps in welded.items():
+        fns = [d for d in deps if d in defined]
+        closure = cluster_closure(source, set(fns), defined) if fns else set()
+        out[target] = {
+            "direct": len(deps),
+            "closure": len(set(fns) | closure),
+            "names": sorted(set(fns) | closure),
+        }
+    return out

@@ -112,6 +112,7 @@ Four modules, standard-library only. High-level analyzers take source text; file
 | | `weld_shape(src, func)` | Welded names grouped by kind, with target vs physical-branch counts |
 | | `unlock_tiers(src, func, seam=…, exclusive_helpers=…)` | The cumulative staircase: what unlocks with a config move, one seam, then externally confirmed helpers |
 | | `report(src, func, seam=…, exclusive_helpers=…)` | The human-readable weld shape + unlock staircase |
+| | `cluster_cost(src, func)` | Direct dependencies vs the **transitive closure** — what must actually move together |
 
 ---
 
@@ -166,7 +167,7 @@ Nothing to install. Standard library only — `ast`, `symtable`, `builtins` — 
 ```bash
 git clone https://github.com/Lancimoun/carve
 cd carve
-python -m unittest discover tests    # 91 tests, no installs
+python -m unittest discover tests    # 97 tests, no installs
 ```
 
 The CI badge runs that exact command on every branch push, on pull requests to `main`, and through a manual recovery trigger across Python 3.11–3.14. Because CARVE has zero dependencies, a green matrix with **no install step** is itself the proof of the zero-dependency claim.
