@@ -668,7 +668,7 @@ def report(
 
 # --- transitive cluster closure ---------------------------------------------- #
 
-def cluster_closure(source, names, defined=None):
+def cluster_closure(source, names, defined=None, tree=None):
     """Every module-level name reachable from `names`, following definitions.
 
     A dispatch target that needs one private helper looks like a two-file move.
@@ -684,8 +684,16 @@ def cluster_closure(source, names, defined=None):
 
     Returns the closure EXCLUDING the seeds, so `len()` is "how many extra
     definitions come along".
+
+    `tree` is an optional pre-parsed module for `source`. Parsing dominates the
+    cost on a large file, and a caller asking for many closures over the SAME
+    source (`cluster_cost` does, once per welded target) was re-parsing it every
+    call. Passing the tree in is purely a saving: `source` stays the parameter
+    that defines the answer, and when `tree` is omitted this parses exactly as
+    before. Never pass a tree parsed from different text -- the two must
+    describe the same module.
     """
-    tree = ast.parse(source)
+    tree = ast.parse(source) if tree is None else tree
     if defined is None:
         defined = {
             n.name for n in tree.body
@@ -716,6 +724,12 @@ def cluster_cost(source, function_name, discriminant="name"):
 
     Returns {target: {"direct": N, "closure": M, "names": sorted}}. `direct` is
     what the dispatch analysis reports; `closure` is the honest planning number.
+
+    The module is parsed ONCE and the tree reused for every target. It used to be
+    re-parsed per target, which is invisible on a test fixture and quadratic in
+    practice: on Maxima's 1.1 MB dispatcher, 23 welded targets meant 23 full
+    parses and 46 s of wall clock -- over half the loop's entire gate sweep, for
+    an answer that does not depend on how many times the text is read.
     """
     _, welded = dispatch.classify_chain(source, function_name, discriminant=discriminant)
     tree = ast.parse(source)
@@ -726,7 +740,7 @@ def cluster_cost(source, function_name, discriminant="name"):
     out = {}
     for target, deps in welded.items():
         fns = [d for d in deps if d in defined]
-        closure = cluster_closure(source, set(fns), defined) if fns else set()
+        closure = cluster_closure(source, set(fns), defined, tree=tree) if fns else set()
         out[target] = {
             "direct": len(deps),
             "closure": len(set(fns) | closure),

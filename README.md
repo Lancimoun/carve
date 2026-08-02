@@ -167,7 +167,7 @@ Nothing to install. Standard library only — `ast`, `symtable`, `builtins` — 
 ```bash
 git clone https://github.com/Lancimoun/carve
 cd carve
-python -m unittest discover tests    # 97 tests, no installs
+python -m unittest discover tests    # 99 tests, no installs
 ```
 
 The CI badge runs that exact command on every branch push, on pull requests to `main`, and through a manual recovery trigger across Python 3.11–3.14. Because CARVE has zero dependencies, a green matrix with **no install step** is itself the proof of the zero-dependency claim.

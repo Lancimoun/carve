@@ -8,7 +8,9 @@ between tiers when a seam is injected — because a plan built on a miscount sen
 the work at a wall, which is the failure CARVE exists to prevent.
 """
 
+import ast
 import unittest
+from unittest import mock
 
 from carve import seam
 
@@ -524,6 +526,40 @@ class ClusterClosure(unittest.TestCase):
             "    return None\n"
         )
         self.assertEqual(seam.cluster_closure(source, {"_uses_import"}), set())
+
+    # --- the parse-once optimisation -------------------------------------
+    # These pin the two things a speedup can quietly break: the ANSWER, and the
+    # property that bought the speed. Timing is not asserted -- a wall-clock
+    # assertion is flaky on shared runners and would not say *why* it got slow.
+    # Counting parses does, and it fails the moment someone reintroduces the
+    # per-target re-parse.
+
+    def test_passing_a_tree_gives_the_identical_answer(self):
+        tree = ast.parse(self.CHAIN)
+        self.assertEqual(
+            seam.cluster_closure(self.CHAIN, {"_top"}, tree=tree),
+            seam.cluster_closure(self.CHAIN, {"_top"}),
+        )
+
+    def test_cluster_cost_parses_the_source_a_bounded_number_of_times(self):
+        """The regression that cost 46 s: one parse PER WELDED TARGET."""
+        real, calls = ast.parse, []
+
+        def counting(src, *a, **k):
+            calls.append(len(src) if isinstance(src, str) else 0)
+            return real(src, *a, **k)
+
+        with mock.patch.object(seam.ast, "parse", counting):
+            cost = seam.cluster_cost(self.CHAIN, "run_tool")
+
+        # three welded/free targets in the fixture, and the module must be read
+        # a fixed number of times regardless -- not once per target.
+        self.assertGreaterEqual(len(cost), 2)
+        self.assertLessEqual(
+            len(calls), 2,
+            f"cluster_cost parsed the module {len(calls)} times for "
+            f"{len(cost)} targets; it must parse once and reuse the tree",
+        )
 
 
 if __name__ == "__main__":
