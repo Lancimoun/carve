@@ -657,6 +657,30 @@ class CarryStrategyTests(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertTrue(seam.carry_strategy(self.SOURCE, [name])[name]["why"])
 
+    def test_a_function_is_inject_with_a_TRUE_reason(self):
+        """The defect this pins: functions fell through to the value logic and
+        came back `bind` because of "undefined-at-module-level" — a refusal with
+        a reason that is simply false. The function IS defined; it is just not an
+        assignment, and only assignments are inspected for carry risk. A wrong
+        reason is worse than no answer, because the next reader debugs the wrong
+        thing."""
+        source = (
+            "def _helper():\n"
+            "    return 1\n"
+            "class Thing:\n"
+            "    pass\n"
+        )
+        got = seam.carry_strategy(source, ["_helper", "Thing"])
+        for name in ("_helper", "Thing"):
+            with self.subTest(name=name):
+                self.assertEqual(got[name]["strategy"], seam.CARRY_INJECT)
+                self.assertNotIn("undefined-at-module-level", " ".join(got[name]["why"]))
+
+    def test_a_genuinely_absent_name_still_says_so(self):
+        # The real "I cannot see this" case must survive the fix above.
+        got = seam.carry_strategy("X = 1\n", ["NOPE"])["NOPE"]
+        self.assertIn("undefined-at-module-level", " ".join(got["why"]))
+
     def test_it_is_conservative_rather_than_clever(self):
         """A flag set in the two arms of a try/except around an import really is
         re-derivable — but nothing in the syntax proves those arms correspond to

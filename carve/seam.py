@@ -911,6 +911,20 @@ def carry_strategy(source, names, tree=None):
     for name in names:
         reasons = risks.get(name, [])
         kind = kinds.get(name)
+        if kind in ("function", "async-fn", "class"):
+            # A function is not a value and was never a candidate for `copy`.
+            # The first version fell through to the value logic and reported
+            # `bind` because of "undefined-at-module-level" -- technically a
+            # refusal, but with a reason that is simply untrue: the function is
+            # defined, it is just not an ASSIGNMENT, and `value_carry_risk` only
+            # inspects assignments. A wrong reason is worse than no answer,
+            # because the next reader debugs the wrong thing. Found on the tool's
+            # first real use against a service cluster.
+            out[name] = {"strategy": CARRY_INJECT,
+                         "why": [f"a {kind} -- behaviour, not a value. Either move it "
+                                 f"(only with whole-program proof it has no other "
+                                 f"consumer) or pass it through a seam"]}
+            continue
         if kind in ("import", "import-alias"):
             out[name] = {"strategy": CARRY_REDERIVE,
                          "why": ["an import follows you: re-running it in the same "
