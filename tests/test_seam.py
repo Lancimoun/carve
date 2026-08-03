@@ -562,5 +562,59 @@ class ClusterClosure(unittest.TestCase):
         )
 
 
+class ValueCarryRiskTests(unittest.TestCase):
+    """A closure of zero says no CODE comes along. It says nothing about whether
+    the VALUE survives being copied — and that gap ships silently."""
+
+    SOURCE = (
+        "import os\n"
+        "from pathlib import Path\n"
+        "BASE = Path(__file__).parent\n"
+        "DATA = BASE / 'data'\n"
+        "FILE = DATA / 'x.json'\n"
+        "TZ = os.getenv('TZ', 'UTC')\n"
+        "if os.getenv('OVERRIDE'):\n"
+        "    TZ = 'Asia/Manila'\n"
+        "FEEDS = ['a', 'b']\n"
+        "LIMIT = 5\n"
+    )
+
+    def risk(self, *names):
+        return seam.value_carry_risk(self.SOURCE, names)
+
+    def test_a_plain_literal_is_safe_to_carry(self):
+        self.assertEqual(self.risk("FEEDS", "LIMIT"), {"FEEDS": [], "LIMIT": []})
+
+    def test_a_file_relative_value_is_flagged(self):
+        self.assertTrue(any("file-relative" in r for r in self.risk("BASE")["BASE"]))
+
+    def test_risk_propagates_through_one_hop(self):
+        # DATA = BASE / 'data' contains no __file__ of its own.
+        reasons = self.risk("DATA")["DATA"]
+        self.assertTrue(any("file-relative" in r and "via BASE" in r for r in reasons))
+
+    def test_risk_propagates_through_two_hops(self):
+        """The regression that mattered: the first version stopped at one hop and
+        called a two-hop file-relative path safe."""
+        reasons = self.risk("FILE")["FILE"]
+        self.assertTrue(reasons, "FILE derives from BASE via DATA and must not read as safe")
+        self.assertTrue(any("file-relative" in r for r in reasons))
+
+    def test_a_conditionally_rebound_name_is_flagged(self):
+        # Bound once at module level, then again inside `if:` — the visible first
+        # assignment is not what the program runs with.
+        self.assertTrue(any("rebound" in r for r in self.risk("TZ")["TZ"]))
+
+    def test_environment_dependence_is_flagged(self):
+        self.assertTrue(any("environment-dependent" in r for r in self.risk("TZ")["TZ"]))
+
+    def test_an_unknown_name_is_reported_not_silently_passed(self):
+        self.assertEqual(self.risk("NOPE")["NOPE"], ["undefined-at-module-level"])
+
+    def test_a_cycle_terminates(self):
+        source = "A = B\nB = A\n"
+        self.assertIsInstance(seam.value_carry_risk(source, ["A"])["A"], list)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

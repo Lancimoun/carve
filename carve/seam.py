@@ -747,3 +747,121 @@ def cluster_cost(source, function_name, discriminant="name"):
             "names": sorted(set(fns) | closure),
         }
     return out
+
+
+# --- carrying a VALUE is not the same as carrying no code -------------------
+
+def _module_assign_targets(tree):
+    """{name: [assignment nodes]} for every module-level binding, including the
+    ones nested inside `if` / `try` at module scope — which is precisely where a
+    conditional rebinding hides."""
+    out = {}
+
+    def walk(body):
+        for node in body:
+            if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                for t in targets:
+                    if isinstance(t, ast.Name):
+                        out.setdefault(t.id, []).append(node)
+            # Module-level control flow still binds at module level.
+            for attr in ("body", "orelse", "finalbody"):
+                inner = getattr(node, attr, None)
+                if inner and isinstance(node, (ast.If, ast.Try, ast.With, ast.For, ast.While)):
+                    walk(inner)
+            for handler in getattr(node, "handlers", []):
+                walk(handler.body)
+
+    walk(tree.body)
+    return out
+
+
+def value_carry_risk(source, names, tree=None):
+    """Why a module-level VALUE may be unsafe to copy into another module.
+
+    `cluster_cost` answers "what code must move with this target". A closure of
+    zero reads as "nothing comes along, this is free" — and for a dispatch target
+    welded only to module-level values, that reading is wrong in a way that
+    compiles, imports, passes tests, and is wrong at run time.
+
+    Three ways a value refuses to be copied, each observed in real source:
+
+      rebound       assigned in more than one place, so the visible first
+                    assignment is not the value the program actually runs with.
+                    (`TIMEZONE = a or b` then rebound inside `if:` eleven lines
+                    later — copy the first line and the override silently stops
+                    applying.)
+      file-relative the right-hand side mentions `__file__`, whose meaning is the
+                    file it is written in. An identical copy in a new module is a
+                    DIFFERENT path — same bytes, different value.
+      environment   the right-hand side branches on the environment (`os.getenv`,
+                    `Path.exists`, `os.environ`), so it is a decision made at
+                    import time, not a constant. Copying it re-decides, and the
+                    two modules can disagree.
+
+    Returns {name: [reasons]}, empty list meaning nothing objected. Names with no
+    module-level assignment at all are reported as `undefined-at-module-level`
+    rather than silently omitted — a missing name is a finding, not a pass.
+    """
+    tree = ast.parse(source) if tree is None else tree
+    assigns = _module_assign_targets(tree)
+
+    def direct(name, nodes):
+        found = []
+        if len(nodes) > 1:
+            found.append(f"rebound ({len(nodes)} module-level assignments)")
+        for node in nodes:
+            value = getattr(node, "value", None)
+            if value is None:
+                continue
+            for sub in ast.walk(value):
+                if isinstance(sub, ast.Name) and sub.id == "__file__":
+                    found.append("file-relative (__file__ means a different path once moved)")
+                elif isinstance(sub, ast.Attribute) and sub.attr in ("getenv", "environ", "exists"):
+                    found.append(f"environment-dependent (.{sub.attr} decides at import time)")
+                elif isinstance(sub, ast.Name) and sub.id in ("getenv", "environ"):
+                    found.append("environment-dependent (getenv decides at import time)")
+        return found
+
+    def refs(nodes):
+        """Module-level names this binding's right-hand side reads."""
+        out = set()
+        for node in nodes:
+            value = getattr(node, "value", None)
+            if value is None:
+                continue
+            for sub in ast.walk(value):
+                if isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Load) and sub.id in assigns:
+                    out.add(sub.id)
+        return out
+
+    def resolve(name, seen):
+        # Risk PROPAGATES. The first version of this function checked only a
+        # binding's own right-hand side and pronounced
+        # `SOUL_FILE = BOT_DIR.parent / "soul" / "x.md"` safe to carry -- while
+        # `BOT_DIR` is `Path(__file__).parent`. The value is file-relative at one
+        # remove, and a checker that stops at the first hop hands out exactly the
+        # false green it was written to prevent.
+        if name in seen:
+            return []                      # cycle: already accounted for
+        seen = seen | {name}
+        nodes = assigns.get(name)
+        if not nodes:
+            return ["undefined-at-module-level"]
+        found = list(direct(name, nodes))
+        for parent in sorted(refs(nodes)):
+            for reason in resolve(parent, seen):
+                if reason == "undefined-at-module-level":
+                    continue
+                found.append(f"{reason}  [via {parent}]")
+        return found
+
+    risks = {}
+    for name in names:
+        seen_reasons, ordered = set(), []
+        for reason in resolve(name, frozenset()):
+            if reason not in seen_reasons:
+                seen_reasons.add(reason)
+                ordered.append(reason)
+        risks[name] = ordered
+    return risks
