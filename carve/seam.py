@@ -865,3 +865,67 @@ def value_carry_risk(source, names, tree=None):
                 ordered.append(reason)
         risks[name] = ordered
     return risks
+
+
+# Techniques a welded VALUE can be carried by, cheapest first. The point of
+# naming them is that `value_carry_risk` says why a copy is unsafe and stops --
+# leaving "so what do I do instead?" to be re-derived by hand every time.
+CARRY_COPY = "copy"          # restate the literal in the new module
+CARRY_REDERIVE = "re-derive"  # recompute locally; safe only if it cannot disagree
+CARRY_BIND = "bind"          # the origin hands the computed value over, once
+CARRY_INJECT = "inject"      # a live handle: forward at call time, never capture
+
+
+def carry_strategy(source, names, tree=None):
+    """For each name: the technique that actually carries it, and why.
+
+    `value_carry_risk` answers "is copying this safe?" and stops at no. That
+    leaves the useful half unanswered, and it is the half that takes judgement:
+    *re-derive, bind, or inject?* Three consecutive real extractions arrived at
+    three different answers for values that all looked alike from the risk report,
+    so the reasoning is written down here instead of being redone each time.
+
+    The rule underneath is one question -- **does this thing's derivation mean the
+    same in the new file?**
+
+      import           yes. Imports follow you: re-running `import x` in another
+                       module of the same process is a sys.modules cache hit and
+                       cannot disagree.  -> re-derive
+      plain literal    yes. Nothing to disagree with.  -> copy
+      `__file__` path  NO. The same text names a different path.  -> bind
+      env / filesystem NO. It is a decision made at import time, and the two
+                       modules can be asked in different conditions.  -> bind
+      rebound value    NO. The visible assignment is not the value in use.  -> bind
+      live handle      NO, and worse -- there is only one, and it owns a
+                       connection or a lock.  -> inject
+
+    Returns {name: {"strategy": str, "why": [reasons]}}. Conservative by
+    construction: anything not provably safe to copy is at least `bind`, because
+    a wrong `copy` compiles and a wrong `bind` fails loudly at startup.
+    """
+    tree = ast.parse(source) if tree is None else tree
+    risks = value_carry_risk(source, names, tree=tree)
+    kinds = _classify_kinds(tree)
+
+    out = {}
+    for name in names:
+        reasons = risks.get(name, [])
+        kind = kinds.get(name)
+        if kind in ("import", "import-alias"):
+            out[name] = {"strategy": CARRY_REDERIVE,
+                         "why": ["an import follows you: re-running it in the same "
+                                 "process is a cache hit and cannot disagree"]}
+            continue
+        if kind == "shared-state":
+            out[name] = {"strategy": CARRY_INJECT,
+                         "why": ["a live handle -- there is only one, and it owns a "
+                                 "lock or a connection, so it must be forwarded at "
+                                 "call time rather than captured"]}
+            continue
+        if not reasons:
+            out[name] = {"strategy": CARRY_COPY,
+                         "why": ["nothing objects: no rebinding, no __file__, no "
+                                 "environment decision"]}
+            continue
+        out[name] = {"strategy": CARRY_BIND, "why": list(reasons)}
+    return out

@@ -616,5 +616,65 @@ class ValueCarryRiskTests(unittest.TestCase):
         self.assertIsInstance(seam.value_carry_risk(source, ["A"])["A"], list)
 
 
+class CarryStrategyTests(unittest.TestCase):
+    """`value_carry_risk` says whether copying is safe and stops there. This says
+    what to do instead — the half that was being re-derived by hand every time."""
+
+    SOURCE = (
+        "import os\n"
+        "import re\n"
+        "import threading\n"
+        "from pathlib import Path\n"
+        "_re = re\n"
+        "LOCK = threading.Lock()\n"
+        "LIMIT = 5\n"
+        "BASE = Path(__file__).parent\n"
+        "TZ = os.getenv('TZ', 'UTC')\n"
+        "if os.getenv('OVERRIDE'):\n"
+        "    TZ = 'Asia/Manila'\n"
+    )
+
+    def strategy(self, name):
+        return seam.carry_strategy(self.SOURCE, [name])[name]["strategy"]
+
+    def test_an_import_alias_is_re_derived_because_imports_follow_you(self):
+        self.assertEqual(self.strategy("_re"), seam.CARRY_REDERIVE)
+
+    def test_a_plain_literal_is_copied(self):
+        self.assertEqual(self.strategy("LIMIT"), seam.CARRY_COPY)
+
+    def test_a_file_relative_path_is_bound_not_copied(self):
+        self.assertEqual(self.strategy("BASE"), seam.CARRY_BIND)
+
+    def test_a_rebound_environment_value_is_bound(self):
+        self.assertEqual(self.strategy("TZ"), seam.CARRY_BIND)
+
+    def test_a_live_lock_is_injected_never_captured(self):
+        self.assertEqual(self.strategy("LOCK"), seam.CARRY_INJECT)
+
+    def test_every_answer_carries_its_reason(self):
+        for name in ("_re", "LIMIT", "BASE", "TZ", "LOCK"):
+            with self.subTest(name=name):
+                self.assertTrue(seam.carry_strategy(self.SOURCE, [name])[name]["why"])
+
+    def test_it_is_conservative_rather_than_clever(self):
+        """A flag set in the two arms of a try/except around an import really is
+        re-derivable — but nothing in the syntax proves those arms correspond to
+        import success and failure. CARVE answers `bind`, the safe direction, and
+        a caller holding whole-program evidence may override it, exactly as
+        `exclusive_helpers` already works. A wrong `copy` compiles and ships; a
+        wrong `bind` fails loudly at startup."""
+        source = (
+            "try:\n"
+            "    import mss\n"
+            "    AVAILABLE = True\n"
+            "except ImportError:\n"
+            "    AVAILABLE = False\n"
+        )
+        self.assertEqual(
+            seam.carry_strategy(source, ["AVAILABLE"])["AVAILABLE"]["strategy"],
+            seam.CARRY_BIND)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

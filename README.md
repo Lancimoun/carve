@@ -114,6 +114,7 @@ Four modules, standard-library only. High-level analyzers take source text; file
 | | `report(src, func, seam=…, exclusive_helpers=…)` | The human-readable weld shape + unlock staircase |
 | | `cluster_cost(src, func)` | Direct dependencies vs the **transitive closure** — what must actually move together |
 | | `value_carry_risk(src, names)` | Why a module-level **value** may not survive being copied — rebound, `__file__`-relative, or environment-dependent, propagated through the names it derives from |
+| | `carry_strategy(src, names)` | Which technique actually carries each name — **copy · re-derive · bind · inject** — with the reason, answering the half `value_carry_risk` leaves open |
 
 ---
 
@@ -168,7 +169,7 @@ Nothing to install. Standard library only — `ast`, `symtable`, `builtins` — 
 ```bash
 git clone https://github.com/Lancimoun/carve
 cd carve
-python -m unittest discover tests    # 107 tests, no installs
+python -m unittest discover tests    # 114 tests, no installs
 ```
 
 The CI badge runs that exact command on every branch push, on pull requests to `main`, and through a manual recovery trigger across Python 3.11–3.14. Because CARVE has zero dependencies, a green matrix with **no install step** is itself the proof of the zero-dependency claim.
