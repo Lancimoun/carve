@@ -9,7 +9,7 @@ It measures four questions without importing or executing the source:
 These are extraction-planning signals, not proof of behavioral equivalence.
 """
 
-from . import coupling, dispatch, resolve, seam  # noqa: F401
+from . import coupling, dispatch, guards, resolve, seam  # noqa: F401
 
 __all__ = ["coupling", "dispatch", "resolve", "seam"]
 __version__ = "0.2.0"
