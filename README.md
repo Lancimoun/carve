@@ -109,7 +109,7 @@ Tier 2 is intentionally strict. Because one source file cannot prove that anothe
 
 ## API
 
-Four modules, standard-library only. High-level analyzers take source text; filesystem checks take paths; the low-level discovery helpers explicitly take parsed `ast` trees. Nothing is imported or executed.
+Five modules, standard-library only. High-level analyzers take source text; filesystem checks take paths; the low-level discovery helpers explicitly take parsed `ast` trees. Nothing is imported or executed.
 
 | Module | Function | What it answers |
 |---|---|---|
@@ -120,6 +120,10 @@ Four modules, standard-library only. High-level analyzers take source text; file
 | | `find_function(tree, name)` | Locates one top-level function in a parsed `ast.Module` |
 | | `classify_chain(src, func)` | Classifies each dispatch **target** as free or welded |
 | | `report(src, func)` | Aggregate free/welded targets plus physical-branch count |
+| **`guards`** | `refusals(src, name)` | What a function **refuses** — each `raise` paired with the condition that guards it |
+| | `class_refusals(src, cls)` | The same across a class, because validation is routinely *delegated* to a helper |
+| | `bare_guards(src, name)` | Conditions it silently returns on instead — the opposite of a refusal, and often the bug |
+| | `compare(a, b, name)` · `compare_classes(a, b, cls)` · `report(…)` | What one implementation rejects that the other waves through |
 | **`resolve`** | `unresolved_names(src)` | Names a module uses but never imports or defines |
 | | `check_path(path)` · `check_package(dir)` | The same check across a file or a whole package |
 | **`seam`** | `classify_kinds(src)` | Proven carry kinds for supported module-level bindings |
@@ -142,6 +146,16 @@ Four modules, standard-library only. High-level analyzers take source text; file
 **3 — The `orelse` trap.** `ast.walk` on an `if` descends into `orelse` — which in an if/elif chain is *the entire rest of the chain*. So branch #1 appears to depend on everything #2…#219 do, and #219 on nothing. The counts slide smoothly down the chain and look like a real finding about layering. They are a finding about the walker: **a number that decreases neatly with position is measuring position.** Every function in `dispatch` walks `node.body` only.
 
 **4 — The operator trap.** `name != "blocked"` contains the same names as `name == "blocked"` and means the opposite thing. CARVE accepts only exact equality to one string or membership in an all-string literal collection; a candidate chain containing `!=`, `not in`, ordering, chained comparisons, or equality to a tuple fails closed instead of splicing its potentially unreachable suffix into an invented inventory.
+
+**8 — The refusal trap.** Two implementations can share every signature, constant and return type — and differ in the only place that matters: **what they turn down**. Real case, two copies of one engine with identical public surfaces:
+
+```python
+run(authorize={"typo"})    # a name that does not exist
+run(authorize={"ungated"}) # a node needing no authorization
+run(authorize=["name"])    # a list, not a set
+```
+
+One raised on all three; the other accepted all three **silently**, and had been running the security-relevant path for weeks. No interface diff can see this, because refusals live in the negative space — behaviour on inputs you would never deliberately send. `guards.compare_classes` reported **7 refusals present in one and absent in the other, and none the other way**. Note the *class* form: the guards lived in a `_validate` helper, so a method-level comparison found two differences and missed the five that mattered.
 
 **5 — The helper trap.** "Used by one target" does not mean "moves with one branch." A helper may call or write shared state, depend on a default or decorator evaluated at definition time, be public, serve another function or module, or be the dispatcher itself. Tier 2 requires caller-confirmed external exclusivity plus a private, self-contained helper used only from one physical branch; everything unproven stays in tier 3.
 
@@ -196,7 +210,7 @@ Nothing to install. Standard library only — `ast`, `symtable`, `builtins` — 
 ```bash
 git clone https://github.com/Lancimoun/carve
 cd carve
-python -m unittest discover tests    # 125 tests, no installs
+python -m unittest discover tests    # 144 tests, no installs
 ```
 
 The CI badge runs that exact command on every branch push, on pull requests to `main`, and through a manual recovery trigger across Python 3.11–3.14. Because CARVE has zero dependencies, a green matrix with **no install step** is itself the proof of the zero-dependency claim.
