@@ -616,6 +616,67 @@ class ValueCarryRiskTests(unittest.TestCase):
         self.assertIsInstance(seam.value_carry_risk(source, ["A"])["A"], list)
 
 
+class RemainingCostTests(unittest.TestCase):
+    """`closure` is the cost of a move from a standing start. Part way through an
+    extraction it keeps charging for work already finished, which is a planning
+    error in the expensive direction — it makes done work look pending."""
+
+    SOURCE = (
+        "def _deep(): return 1\n"
+        "def _mid(): return _deep()\n"
+        "def load_memory(): return _mid()\n"
+        "def _own(): return 2\n"
+        "def run_tool(name, inputs):\n"
+        "    if name == 'a':\n"
+        "        return load_memory()\n"
+        "    elif name == 'b':\n"
+        "        return load_memory() + _own()\n"
+        "    elif name == 'c':\n"
+        "        return inputs['x']\n"
+    )
+
+    def test_without_provided_it_charges_for_everything(self):
+        cost = seam.cluster_cost(self.SOURCE, "run_tool")
+        self.assertEqual(cost["a"]["closure"], 3)      # load_memory + _mid + _deep
+        self.assertEqual(cost["a"]["remaining"], 3)    # nothing seamed yet
+
+    def test_a_seamed_name_costs_nothing_to_move_again(self):
+        cost = seam.cluster_cost(self.SOURCE, "run_tool", provided={"load_memory"})
+        self.assertEqual(cost["a"]["remaining"], 0)
+        self.assertEqual(cost["a"]["remaining_names"], [])
+
+    def test_what_the_seamed_name_dragged_along_also_stops_counting(self):
+        """The overcount hides here: `_mid` and `_deep` are reachable ONLY through
+        `load_memory`, so binding it takes them too. A naive subtraction of just
+        the provided name would still charge 2."""
+        cost = seam.cluster_cost(self.SOURCE, "run_tool", provided={"load_memory"})
+        self.assertNotIn("_mid", cost["a"]["remaining_names"])
+        self.assertNotIn("_deep", cost["a"]["remaining_names"])
+
+    def test_a_name_the_seam_does_not_cover_is_still_charged(self):
+        cost = seam.cluster_cost(self.SOURCE, "run_tool", provided={"load_memory"})
+        self.assertEqual(cost["b"]["remaining_names"], ["_own"])
+        self.assertEqual(cost["b"]["remaining"], 1)
+
+    def test_closure_is_unchanged_by_provided(self):
+        # `closure` must keep answering its own question. Two numbers, two uses:
+        # closure sizes the move, remaining schedules it.
+        bare = seam.cluster_cost(self.SOURCE, "run_tool")
+        with_seam = seam.cluster_cost(self.SOURCE, "run_tool", provided={"load_memory"})
+        for target in bare:
+            with self.subTest(target=target):
+                self.assertEqual(bare[target]["closure"], with_seam[target]["closure"])
+
+    def test_it_reports_what_was_already_provided(self):
+        cost = seam.cluster_cost(self.SOURCE, "run_tool", provided={"load_memory"})
+        self.assertEqual(cost["a"]["already_provided"], ["load_memory"])
+
+    def test_providing_an_unrelated_name_changes_nothing(self):
+        bare = seam.cluster_cost(self.SOURCE, "run_tool")
+        noise = seam.cluster_cost(self.SOURCE, "run_tool", provided={"not_a_real_name"})
+        self.assertEqual(bare["a"]["remaining"], noise["a"]["remaining"])
+
+
 class CarryStrategyTests(unittest.TestCase):
     """`value_carry_risk` says whether copying is safe and stops there. This says
     what to do instead — the half that was being re-derived by hand every time."""

@@ -719,11 +719,25 @@ def cluster_closure(source, names, defined=None, tree=None):
     return seen
 
 
-def cluster_cost(source, function_name, discriminant="name"):
+def cluster_cost(source, function_name, discriminant="name", provided=()):
     """Per welded target: direct deps vs what must actually move with it.
 
-    Returns {target: {"direct": N, "closure": M, "names": sorted}}. `direct` is
-    what the dispatch analysis reports; `closure` is the honest planning number.
+    Returns {target: {"direct", "closure", "remaining", "remaining_names",
+    "already_provided", "names"}}. `direct` is what the dispatch analysis reports;
+    `closure` is what must move if nothing has been extracted yet.
+
+    `provided` is the answer to a question that only appears once you are *part
+    way through* an extraction: which names does an existing seam already hand
+    over? `closure` cannot know, so it keeps charging for work that is finished.
+    On the module this was built against, two targets measured 8 and 12 — and the
+    honest remaining cost was **2 and 1**, because `load_memory`, `save_memory`
+    and `BOT_DIR` had been seamed several iterations earlier and everything they
+    dragged behind them came free with them.
+
+    The overcount is not a rounding error, it is a **planning** error in the
+    expensive direction: it makes finished work look pending and pushes the next
+    cheap move down the queue behind targets that only look comparable. Pass the
+    names your seam module already exposes and `remaining` is what is left.
 
     The module is parsed ONCE and the tree reused for every target. It used to be
     re-parsed per target, which is invisible on a test fixture and quadratic in
@@ -737,13 +751,28 @@ def cluster_cost(source, function_name, discriminant="name"):
         n.name for n in tree.body
         if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
     }
+    supplied = set(provided)
     out = {}
     for target, deps in welded.items():
         fns = [d for d in deps if d in defined]
         closure = cluster_closure(source, set(fns), defined, tree=tree) if fns else set()
+        whole = set(fns) | closure
+        # Names an existing seam already hands over cost NOTHING to move again --
+        # and neither does anything reachable only through them, which is where
+        # the overcount hides. `remaining` re-walks the closure from the seeds the
+        # seam does NOT cover, so a helper pulled in solely by `load_memory` stops
+        # being counted the moment `load_memory` is bound.
+        unseamed = {f for f in fns if f not in supplied}
+        remaining = unseamed | (
+            cluster_closure(source, unseamed, defined, tree=tree) if unseamed else set()
+        )
+        remaining -= supplied
         out[target] = {
             "direct": len(deps),
-            "closure": len(set(fns) | closure),
+            "closure": len(whole),
+            "remaining": len(remaining),
+            "remaining_names": sorted(remaining),
+            "already_provided": sorted(whole & supplied),
             "names": sorted(set(fns) | closure),
         }
     return out
