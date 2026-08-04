@@ -60,6 +60,19 @@ The worst monoliths do not scatter their mass across many functions — they hid
 
 `carve.dispatch` makes **each dispatch target a unit** and classifies it individually, while still reporting when several targets share one physical branch. A giant dispatcher becomes an aggregate worklist instead of a wall.
 
+### Size is one question; technique is the other
+
+`cluster_cost` answers *how big*. It does not answer *how* — and the two come apart the moment a target's dependencies are values rather than functions. A name that cannot safely be copied has three other fates, and `carry_strategy` picks between them from one question: **does this thing's derivation mean the same in the new file?**
+
+| | verdict | because |
+|---|---|---|
+| an import | **re-derive** | imports follow you; re-running one in the same process is a cache hit and cannot disagree |
+| a plain literal | **copy** | nothing to disagree with |
+| a `__file__` path · an env decision · a rebound value | **bind** | the origin hands over the value it already computed |
+| a live handle or shared function | **inject** | there is only one, and it owns a connection, a lock, or callers you have not found yet |
+
+It is conservative by construction: anything not provably safe to copy is at least `bind`, because **a wrong `copy` compiles and ships while a wrong `bind` fails loudly at startup**. A caller holding whole-program evidence may overrule it, the same way `exclusive_helpers` works.
+
 ### Sizing the seam — the order a weld comes apart
 
 `dispatch` tells you a target is welded. It does not tell you *how hard*, and the names a weld references are wildly unequal in cost. A **proven** import alias (`import re; _re = re`) re-imports cheaply; a literal can move to a config/data module; a live handle or shared function needs an explicit seam. Count the welded targets and they all look equally stuck; classify only what the syntax proves and a safer plan appears.
@@ -104,6 +117,7 @@ Four modules, standard-library only. High-level analyzers take source text; file
 | | `report(src)` | The human-readable summary shown above |
 | | `defined_names(tree)` · `imported_names(tree)` | Low-level name sets from a parsed `ast.Module` |
 | **`dispatch`** | `find_chain(tree, func)` | Locates the `if/elif` dispatch chain in a parsed `ast.Module` |
+| | `find_function(tree, name)` | Locates one top-level function in a parsed `ast.Module` |
 | | `classify_chain(src, func)` | Classifies each dispatch **target** as free or welded |
 | | `report(src, func)` | Aggregate free/welded targets plus physical-branch count |
 | **`resolve`** | `unresolved_names(src)` | Names a module uses but never imports or defines |
@@ -112,6 +126,7 @@ Four modules, standard-library only. High-level analyzers take source text; file
 | | `weld_shape(src, func)` | Welded names grouped by kind, with target vs physical-branch counts |
 | | `unlock_tiers(src, func, seam=…, exclusive_helpers=…)` | The cumulative staircase: what unlocks with a config move, one seam, then externally confirmed helpers |
 | | `report(src, func, seam=…, exclusive_helpers=…)` | The human-readable weld shape + unlock staircase |
+| | `cluster_closure(src, names)` | Every module-level name reachable from `names` — the transitive set behind `cluster_cost` |
 | | `cluster_cost(src, func, provided=…)` | Direct dependencies vs the **transitive closure** — and, given the names an existing seam already supplies, what is actually **left** |
 | | `value_carry_risk(src, names)` | Why a module-level **value** may not survive being copied — rebound, `__file__`-relative, or environment-dependent, propagated through the names it derives from |
 | | `carry_strategy(src, names)` | Which technique actually carries each name — **copy · re-derive · bind · inject** — with the reason, answering the half `value_carry_risk` leaves open |
@@ -129,6 +144,18 @@ Four modules, standard-library only. High-level analyzers take source text; file
 **4 — The operator trap.** `name != "blocked"` contains the same names as `name == "blocked"` and means the opposite thing. CARVE accepts only exact equality to one string or membership in an all-string literal collection; a candidate chain containing `!=`, `not in`, ordering, chained comparisons, or equality to a tuple fails closed instead of splicing its potentially unreachable suffix into an invented inventory.
 
 **5 — The helper trap.** "Used by one target" does not mean "moves with one branch." A helper may call or write shared state, depend on a default or decorator evaluated at definition time, be public, serve another function or module, or be the dispatcher itself. Tier 2 requires caller-confirmed external exclusivity plus a private, self-contained helper used only from one physical branch; everything unproven stays in tier 3.
+
+**6 — A closure of zero does not mean free.** `cluster_cost` counts the *code* that must travel. When a target's only dependencies are module-level **values**, it reports zero — and that reads as the cheapest move available. It is often the most dangerous one, because a value can refuse to be copied in three ways that all compile:
+
+```python
+TZ = os.getenv("TZ", "UTC")      # rebound eleven lines later inside an `if:`
+DATA = Path("/d") if ok else BASE # decided at import time; two modules can disagree
+BASE = Path(__file__).parent      # an identical copy is a DIFFERENT path
+```
+
+Copy any of those into a new module and it imports, passes its tests, and is wrong at run time. `value_carry_risk` names which of the three applies, and **propagates**: `FILE = BASE / "x.json"` contains no `__file__` of its own and is still file-relative, so every reason carries its chain — `file-relative … [via BASE]`.
+
+**7 — Cost is relative to what you have already built.** `closure` measures a move *from a standing start*, so part-way through an extraction it keeps charging for names an existing seam already supplies. On the module CARVE came from, one target measured 8 and the honest remaining figure was **2**; another measured 5 and needed **nothing at all**. Pass `provided=` and the arithmetic corrects itself — and note it is not a subtraction, because binding a name also delivers whatever was reachable only through it.
 
 ---
 
@@ -169,7 +196,7 @@ Nothing to install. Standard library only — `ast`, `symtable`, `builtins` — 
 ```bash
 git clone https://github.com/Lancimoun/carve
 cd carve
-python -m unittest discover tests    # 123 tests, no installs
+python -m unittest discover tests    # 125 tests, no installs
 ```
 
 The CI badge runs that exact command on every branch push, on pull requests to `main`, and through a manual recovery trigger across Python 3.11–3.14. Because CARVE has zero dependencies, a green matrix with **no install step** is itself the proof of the zero-dependency claim.

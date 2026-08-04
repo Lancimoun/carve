@@ -11,6 +11,50 @@ WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
 README = ROOT / "README.md"
 
 
+class ReadmeDocumentsTheWholePublicAPI(unittest.TestCase):
+    """A README can be entirely true and still omit a third of the library.
+
+    Every other README check here verifies that what IS written is correct. None
+    asked whether anything was MISSING — and by the time this was written, two
+    public functions had shipped undocumented: `seam.cluster_closure` and
+    `dispatch.find_function`. Both were reachable, both were tested, and a reader
+    of the API table would never learn they existed.
+
+    That is the same completeness blind spot as a checker that validates the rows
+    it is given and never asks whether the rows are all of them. So this discovers
+    the public surface from the SOURCE rather than from a list: a function added
+    six months from now is covered the day it is written, without anyone
+    remembering to extend a fixture.
+    """
+
+    MODULES = ("coupling", "dispatch", "resolve", "seam")
+
+    def test_every_public_function_appears_in_the_readme(self):
+        import ast
+
+        readme = README.read_text(encoding="utf-8")
+        missing = []
+        for module in self.MODULES:
+            source = (ROOT / "carve" / f"{module}.py").read_text(encoding="utf-8")
+            for node in ast.parse(source).body:
+                if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                if node.name.startswith("_"):
+                    continue
+                if f"{node.name}(" not in readme:
+                    missing.append(f"{module}.{node.name}")
+        self.assertEqual(
+            missing, [],
+            "public function(s) absent from the README API table: %s. A reader "
+            "cannot use what the documentation does not mention." % ", ".join(missing))
+
+    def test_the_detector_would_actually_notice_an_omission(self):
+        """Both directions. The check above passes on a complete README, which is
+        exactly what a check looking at the wrong thing also does."""
+        readme = README.read_text(encoding="utf-8")
+        self.assertNotIn("definitely_not_a_real_carve_function(", readme)
+
+
 class WorkflowContract(unittest.TestCase):
     def setUp(self):
         self.text = WORKFLOW.read_text(encoding="utf-8")
