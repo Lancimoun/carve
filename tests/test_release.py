@@ -1,5 +1,6 @@
 """Repository-release contracts for the public CARVE source clone."""
 
+import os
 import subprocess
 import sys
 import unittest
@@ -107,12 +108,29 @@ class ReadmeContract(unittest.TestCase):
         self.assertNotIn("Every function takes source text or a path", self.text)
 
     def test_the_checked_in_example_runs_and_readme_carries_its_output(self):
+        # Both ends of this pipe are pinned to UTF-8 on purpose.
+        #
+        # The example's output contains an em-dash, and the README is read as
+        # UTF-8 above. Left to their defaults, the child encodes stdout with
+        # `locale.getpreferredencoding()` and the parent decodes with it too --
+        # so on Windows both sides silently become cp1252, and whether they
+        # agree depends on the operator's ambient `PYTHONIOENCODING`. With it
+        # set to utf-8 the child emits UTF-8 while the parent decodes cp1252,
+        # and the em-dash arrives as 'â€”': a diff of thousands of characters
+        # reporting that a correct README does not match its correct example.
+        #
+        # This suite is the proof behind a public "144 tests, no installs"
+        # claim. A test whose verdict depends on an environment variable is not
+        # proof of anything, so neither side is left to the environment.
+        env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
         proc = subprocess.run(
             [sys.executable, "-m", "examples.seam_report"],
             cwd=ROOT,
             check=True,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            env=env,
         )
         output = proc.stdout.strip()
         self.assertTrue(output)
